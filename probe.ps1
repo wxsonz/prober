@@ -12,7 +12,7 @@
 $ErrorActionPreference = 'SilentlyContinue'
 $ProgressPreference    = 'SilentlyContinue'
 
-$script:ProberVersion = '0.1.0'
+$script:ProberVersion = '0.2.0'   # bump on every push: the banner shows which copy ran (raw GitHub caches ~5 min)
 $script:Results = New-Object System.Collections.Generic.List[object]
 $script:Spec    = [ordered]@{}
 $script:CurSec  = ''
@@ -508,10 +508,12 @@ function Test-Events {
         $m = [string]$e.Message
         $comp = if ($m -match '(?m)^\s*(Reported by component|Component)\s*:\s*(.+?)\s*$') { $Matches[2] } else { '' }
         $src  = if ($m -match '(?m)^\s*Error Source\s*:\s*(.+?)\s*$') { $Matches[1] } else { '' }
+        $typ  = if ($m -match '(?m)^\s*Error Type\s*:\s*(.+?)\s*$') { $Matches[1] } else { '' }
         if (-not $comp) { $comp = (($m -split "`n") | Where-Object { $_.Trim() } | Select-Object -First 1).Trim() }
         $sev = if ($e.Level -le 2) { 'fatal' } else { 'corrected' }
         $d = "{0:yyyy-MM-dd HH:mm}  id {1}  {2}  {3}" -f $e.TimeCreated, $e.Id, $sev, $comp
         if ($src) { $d += " ($src)" }
+        if ($typ) { $d += " - $typ" }
         Rec 'WHEA event' 'INFO' $d
     }
 
