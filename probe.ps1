@@ -12,7 +12,7 @@
 $ErrorActionPreference = 'SilentlyContinue'
 $ProgressPreference    = 'SilentlyContinue'
 
-$script:ProberVersion = '0.2.0'   # bump on every push: the banner shows which copy ran (raw GitHub caches ~5 min)
+$script:ProberVersion = '0.3.0'   # bump on every push: the banner shows which copy ran (raw GitHub caches ~5 min)
 $script:Results = New-Object System.Collections.Generic.List[object]
 $script:Spec    = [ordered]@{}
 $script:CurSec  = ''
@@ -477,6 +477,47 @@ function Get-Ev([string[]]$Provider, [int[]]$Ids, $Since, [int[]]$Levels) {
     @(Get-WinEvent -FilterHashtable $f -ErrorAction SilentlyContinue)
 }
 
+# WHEA ids 1/3 only say "see the data section": that's a UEFI CPER record. Decode its notification type and sections.
+$script:CperSec = @{
+    '9876ccad-47b4-4bdb-b65e-16f193c4f3db' = 'Processor (generic)'; 'dc3ea0b0-a144-4797-b95b-53fa242b6e1d' = 'Processor (x86)'
+    'a5bc1114-6f64-4ede-b863-3e83ed7c83b1' = 'Memory'; '61ec04fc-48e6-d813-25c9-8daa44750b12' = 'Memory'
+    'd995e954-bbc1-430f-ad91-b44dcb3c6f35' = 'PCI Express'; 'c5753963-3b84-4095-bf78-eddad3f9c9dd' = 'PCI bus'
+    'eb5e4685-ca66-4769-b6a2-26068b001326' = 'PCI device'; '81212a96-09ed-4996-9471-8d729c8e69ed' = 'Firmware error record'
+    '5b51fef7-c79d-4434-8f1b-aa62de3e2c64' = 'DMA remapping'; '71761d37-32b2-45cd-a7d0-b0fedd93e8cf' = 'Intel VT-d'
+}
+$script:CperNotify = @{
+    '3d61a466-ab40-409a-a698-f362d464b38f' = 'BOOT'; 'e8f56ffe-919c-4cc5-ba88-65abe14913bb' = 'MCE'; '2dce8bb1-bdd7-450e-b9ad-9cf4ebd4f890' = 'CMC'
+    'cf93c01f-1a16-4dfc-b8bc-9c4daf67c104' = 'PCIe'; '5bad89ff-b7e6-42c9-814a-cf2485d6e98a' = 'NMI'; 'cc5263e8-9308-454a-89d0-340bd39bc98e' = 'INIT'
+    '4e292f96-d843-4a55-a8c2-d481f27ebeee' = 'CPE'; '9a78788a-bbe8-11e4-809e-67611e5d46b0' = 'SEA'; '5c284c81-b0ae-4e87-a322-b04c85624323' = 'SEI'
+    '09a9d5ac-5204-4214-96e5-94992e752bcd' = 'PEI'
+}
+
+function Decode-Cper($e) {
+    $x = [string]$e.ToXml()
+    if ($x -notmatch '43504552([0-9A-Fa-f]+)') { return '' }
+    $hex = '43504552' + $Matches[1]
+    if ($hex.Length % 2) { $hex = $hex.Substring(0, $hex.Length - 1) }
+    $b = New-Object byte[] ($hex.Length / 2)
+    for ($i = 0; $i -lt $b.Length; $i++) { $b[$i] = [Convert]::ToByte($hex.Substring($i * 2, 2), 16) }
+    if ($b.Length -lt 128) { return '' }
+    $guid = { param($o) $t = New-Object byte[] 16; [Array]::Copy($b, $o, $t, 0, 16); (New-Object Guid (, $t)).ToString() }
+    $sv = [BitConverter]::ToUInt32($b, 12)
+    $sev = if ($sv -le 3) { @('recoverable', 'fatal', 'corrected', 'info')[$sv] } else { "severity $sv" }
+    $nt = & $guid 80; $note = $script:CperNotify[$nt]; if (-not $note) { $note = 'notify ' + $nt }
+    $parts = @()
+    for ($n = 0; $n -lt [math]::Min([BitConverter]::ToUInt16($b, 10), 4); $n++) {
+        $o = 128 + 72 * $n
+        if ($o + 72 -gt $b.Length) { break }
+        $st = & $guid ($o + 16); $name = $script:CperSec[$st]; if (-not $name) { $name = "section $st" }
+        $fru = ([Text.Encoding]::ASCII.GetString($b, $o + 52, 20) -replace '[^\x20-\x7e]', '').Trim()
+        if ($fru) { $name += " '$fru'" }
+        $parts += $name
+    }
+    $d = "{0} {1}: {2}" -f $note, $sev, ($parts -join ', ')
+    if ($note -eq 'BOOT') { $d += ' [firmware report at start-up of an error from BEFORE this boot, e.g. after a hard power-off]' }
+    return $d
+}
+
 function Test-Events {
     $since = (Get-Date).AddDays(-365)
     $oldest = Get-WinEvent -LogName System -Oldest -MaxEvents 1
@@ -509,6 +550,7 @@ function Test-Events {
         $comp = if ($m -match '(?m)^\s*(Reported by component|Component)\s*:\s*(.+?)\s*$') { $Matches[2] } else { '' }
         $src  = if ($m -match '(?m)^\s*Error Source\s*:\s*(.+?)\s*$') { $Matches[1] } else { '' }
         $typ  = if ($m -match '(?m)^\s*Error Type\s*:\s*(.+?)\s*$') { $Matches[1] } else { '' }
+        if (-not $comp) { $comp = Decode-Cper $e }
         if (-not $comp) { $comp = (($m -split "`n") | Where-Object { $_.Trim() } | Select-Object -First 1).Trim() }
         $sev = if ($e.Level -le 2) { 'fatal' } else { 'corrected' }
         $d = "{0:yyyy-MM-dd HH:mm}  id {1}  {2}  {3}" -f $e.TimeCreated, $e.Id, $sev, $comp
