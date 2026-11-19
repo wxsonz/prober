@@ -12,7 +12,7 @@
 $ErrorActionPreference = 'SilentlyContinue'
 $ProgressPreference    = 'SilentlyContinue'
 
-$script:ProberVersion = '0.3.0'   # bump on every push: the banner shows which copy ran (raw GitHub caches ~5 min)
+$script:ProberVersion = '0.4.0'   # bump on every push: the banner shows which copy ran (raw GitHub caches ~5 min)
 $script:Results = New-Object System.Collections.Generic.List[object]
 $script:Spec    = [ordered]@{}
 $script:CurSec  = ''
@@ -1182,4 +1182,18 @@ function Invoke-Prober {
     Write-Host '  Copy the report folder to your USB/phone, then delete it from this machine.' -ForegroundColor Cyan
 }
 
-Invoke-Prober
+# Run from `irm is.gd/prober | iex`: raw GitHub may hand out a copy cached for minutes,
+# so fetch the newest one past the cache and run that instead (once).
+if (-not $script:ScriptDir -and -not $env:PROBER_FRESH) {
+    $src = $null
+    try {
+        [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+        $src = Invoke-RestMethod ('https://raw.githubusercontent.com/wxsonz/prober/main/probe.ps1?' + [guid]::NewGuid()) -UseBasicParsing
+    } catch {}
+    if ($src -and ([string]$src) -match 'ProberVersion') {
+        $env:PROBER_FRESH = '1'
+        try { Invoke-Expression ([string]$src) } finally { Remove-Item Env:PROBER_FRESH -ErrorAction SilentlyContinue }
+    } else { Invoke-Prober }
+} else {
+    Invoke-Prober
+}
