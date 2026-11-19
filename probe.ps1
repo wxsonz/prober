@@ -491,14 +491,29 @@ function Test-Events {
         Rec 'Log cleared' 'WARN' ("System log was manually cleared on {0:yyyy-MM-dd}" -f $clr.TimeCreated) 'Someone wiped the history - ask why'
     }
 
-    $whea = Get-Ev 'Microsoft-Windows-WHEA-Logger' $null $since
-    $fatal = @($whea | Where-Object { @(1, 18, 20) -contains $_.Id })
-    $corr  = @($whea | Where-Object { @(19, 47) -contains $_.Id })
-    $pcie  = @($whea | Where-Object { $_.Id -eq 17 })
-    if ($fatal) { Rec 'Fatal hardware errors' 'FAIL' "$($fatal.Count) (WHEA 1/18/20, last $($fatal[0].TimeCreated.ToString('yyyy-MM-dd')))" 'CPU/RAM/board level crashes. Serious.' }
-    if ($corr)  { Rec 'Corrected CPU/RAM errors' 'WARN' "$($corr.Count) (WHEA 19/47)" 'Hardware is correcting its own errors - can precede failure' }
-    if ($pcie)  { Rec 'PCIe corrected errors' 'INFO' "$($pcie.Count) (WHEA 17)" 'Common and usually benign (power-saving quirks); only worrying with crashes' }
+    # WHEA: severity comes from the event level (language-independent): Critical/Error = fatal, Warning = corrected
+    $whea = @(Get-Ev 'Microsoft-Windows-WHEA-Logger' $null $since)
+    $fatal = @($whea | Where-Object { $_.Level -le 2 })
+    $corr  = @($whea | Where-Object { $_.Level -ge 3 -and $_.Id -ne 17 })
+    $pcie  = @($whea | Where-Object { $_.Level -ge 3 -and $_.Id -eq 17 })
+    $bc124 = @(Get-Ev 'Microsoft-Windows-WER-SystemErrorReporting' @(1001) $since | Where-Object { $_.Message -match '0x00000124' })
+    if ($fatal) {
+        if ($bc124) { Rec 'Fatal hardware errors' 'FAIL' ("{0}, last {1:yyyy-MM-dd}; {2} matching blue screen(s) 0x124" -f $fatal.Count, $fatal[0].TimeCreated, $bc124.Count) 'Confirmed hardware crashes (CPU/RAM/board). Do not buy unless priced as faulty.' }
+        else { Rec 'Fatal hardware errors' 'FAIL' ("{0}, last {1:yyyy-MM-dd}; no matching 0x124 blue screen recorded" -f $fatal.Count, $fatal[0].TimeCreated) 'Logged as fatal but no crash record: check the component below, run stress test 6 and look for new ones. On a store demo unit, ask for a sealed box.' }
+    }
+    if ($corr) { Rec 'Corrected CPU/RAM errors' 'WARN' ("{0}, last {1:yyyy-MM-dd}" -f $corr.Count, $corr[0].TimeCreated) 'A few at boot/wake on an old BIOS = firmware quirk; many, or new ones under stress test 6 = unstable hardware' }
+    if ($pcie) { Rec 'PCIe corrected errors' 'INFO' "$($pcie.Count) (WHEA 17)" 'Common and usually benign (power-saving quirks); only worrying with crashes' }
     if (-not $whea) { Rec 'Hardware errors (WHEA)' 'OK' 'none logged' }
+    foreach ($e in @($fatal + $corr | Sort-Object TimeCreated -Descending | Select-Object -First 5)) {
+        $m = [string]$e.Message
+        $comp = if ($m -match '(?m)^\s*(Reported by component|Component)\s*:\s*(.+?)\s*$') { $Matches[2] } else { '' }
+        $src  = if ($m -match '(?m)^\s*Error Source\s*:\s*(.+?)\s*$') { $Matches[1] } else { '' }
+        if (-not $comp) { $comp = (($m -split "`n") | Where-Object { $_.Trim() } | Select-Object -First 1).Trim() }
+        $sev = if ($e.Level -le 2) { 'fatal' } else { 'corrected' }
+        $d = "{0:yyyy-MM-dd HH:mm}  id {1}  {2}  {3}" -f $e.TimeCreated, $e.Id, $sev, $comp
+        if ($src) { $d += " ($src)" }
+        Rec 'WHEA event' 'INFO' $d
+    }
 
     $bsod = Get-Ev 'Microsoft-Windows-WER-SystemErrorReporting' @(1001) $since
     $dumps = @(Get-ChildItem "$env:SystemRoot\Minidump" -Filter *.dmp)
